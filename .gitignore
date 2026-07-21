@@ -1,0 +1,23 @@
+# QuestaSim / ModelSim
+**/work/
+**/log/
+**/cov/
+**/coverage/
+**/covhtmlreport/
+
+**/*.log
+**/*.wlf
+**/*.ucdb
+**/*.vcd
+**/*.fst
+
+**/transcript
+**/modelsim.ini
+
+# Temporary files
+**/*.tmp
+**/*.bak
+**/*~
+
+# Editor
+.vscode/
