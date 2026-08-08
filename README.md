@@ -6,4 +6,4 @@ Verilog implementations and testbenches for digital communication protocols.
 
 - [x] SPI
 - [x] UART
-- [x ] I2C
+- [x] I2C
