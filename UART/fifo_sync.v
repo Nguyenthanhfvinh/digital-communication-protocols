@@ -1,51 +1,89 @@
 module fifo_sync #(
-    parameter data_width = 8,
-    parameter fifo_depth = 16,
-    parameter addr_width = 4   // 4 for depth=16
-)(
-    input  wire                     clk,
-    input  wire                     rst,        // active low (negedge)
-    input  wire                     wr_en,
-    input  wire                     rd_en,
-    input  wire [data_width-1:0]    data_in,
-    output wire [data_width-1:0]    data_out,
-    output wire                     full,
-    output wire                     empty
-);
+    parameter integer DATA_WIDTH = 8,
+    parameter integer FIFO_DEPTH = 16
+  )(
+    input  wire                  clk,
+    input  wire                  rst_n,
+    input  wire                  wr_en,
+    input  wire                  rd_en,
+    input  wire [DATA_WIDTH-1:0] data_in,
 
-    // memory array
-    reg [data_width-1:0] fifo_mem [0:fifo_depth-1];
+    output wire [DATA_WIDTH-1:0] data_out,
+    output wire                  full,
+    output wire                  empty,
+    output reg                   overflow,
+    output reg                   underflow
+  );
 
-    // read and write pointers (extra MSB for full/empty)
-    reg [addr_width:0] rd_ptr;
-    reg [addr_width:0] wr_ptr;
+  localparam integer ADDR_WIDTH =
+             (FIFO_DEPTH <= 2) ? 1 : $clog2(FIFO_DEPTH);
 
-    assign empty = (rd_ptr == wr_ptr);
-    assign full  = (wr_ptr[addr_width] != rd_ptr[addr_width]) &&
-                   (wr_ptr[addr_width-1:0] == rd_ptr[addr_width-1:0]);
+  localparam integer COUNT_WIDTH =
+             $clog2(FIFO_DEPTH + 1);
 
-    // First-word fall-through: users may consume the current head on the
-    // same clock edge that asserts rd_en.
-    assign data_out = empty ? {data_width{1'b0}} :
-                            fifo_mem[rd_ptr[addr_width-1:0]];
+  reg [DATA_WIDTH-1:0] mem [0:FIFO_DEPTH-1];
 
-    // Allow simultaneous write+read when full (to keep data flowing)
-    wire do_write = wr_en && (!full || rd_en);
-    wire do_read  = rd_en && !empty;
+  reg [ADDR_WIDTH-1:0] rd_ptr;
+  reg [ADDR_WIDTH-1:0] wr_ptr;
 
-    always @(posedge clk or negedge rst) begin
-        if (!rst) begin
-            rd_ptr   <= 0;
-            wr_ptr   <= 0;
-        end else begin
-            if (do_write) begin
-                fifo_mem[wr_ptr[addr_width-1:0]] <= data_in;
-                wr_ptr <= wr_ptr + 1;
-            end
-            if (do_read) begin
-                rd_ptr   <= rd_ptr + 1;
-            end
-        end
+  reg [COUNT_WIDTH-1:0] count;
+
+  wire do_read;
+  wire do_write;
+
+  assign empty = (count == 0);
+  assign full  = (count == FIFO_DEPTH);
+
+  assign data_out =
+         empty ? {DATA_WIDTH{1'b0}} : mem[rd_ptr];
+
+  assign do_read =
+         rd_en && !empty;
+
+  assign do_write =
+         wr_en && (!full || do_read);
+
+  always @(posedge clk or negedge rst_n)
+  begin
+    if (!rst_n)
+    begin
+      rd_ptr    <= {ADDR_WIDTH{1'b0}};
+      wr_ptr    <= {ADDR_WIDTH{1'b0}};
+      count     <= {COUNT_WIDTH{1'b0}};
+      overflow  <= 1'b0;
+      underflow <= 1'b0;
     end
+    else
+    begin
+      overflow  <= wr_en && full && !do_read;
+      underflow <= rd_en && empty;
+
+      if (do_write)
+      begin
+        mem[wr_ptr] <= data_in;
+        if (wr_ptr == FIFO_DEPTH-1)
+          wr_ptr <= {ADDR_WIDTH{1'b0}};
+        else
+          wr_ptr <= wr_ptr + 1'b1;
+      end
+
+      if (do_read)
+      begin
+        if (rd_ptr == FIFO_DEPTH-1)
+          rd_ptr <= {ADDR_WIDTH{1'b0}};
+        else
+          rd_ptr <= rd_ptr + 1'b1;
+      end
+
+      case ({do_write, do_read})
+        2'b10:
+          count <= count + 1'b1;
+        2'b01:
+          count <= count - 1'b1;
+        default:
+          count <= count;
+      endcase
+    end
+  end
 
 endmodule

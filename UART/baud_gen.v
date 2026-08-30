@@ -1,29 +1,49 @@
 module baud_gen #(
-    parameter CLK_FREQ = 27_000_000,   // System clock (Hz)
-    parameter BAUD     = 115200        // Desired baud rate
-)(
+    parameter integer CLK_FREQ  = 100_000_000,
+    parameter integer TICK_RATE = 115_200
+  )(
     input  wire clk,
     input  wire rst_n,
-    output reg  baud_tick             // 1-cycle pulse every bit time
-);
+    input  wire enable,
+    input  wire restart,
+    output wire tick
+  );
 
-    localparam CLKS_PER_BIT = CLK_FREQ / BAUD;   // ≈ 234
-    localparam CNT_WIDTH    = $clog2(CLKS_PER_BIT);
+  localparam integer ACC_WIDTH = $clog2(CLK_FREQ + TICK_RATE + 1);
 
-    reg [CNT_WIDTH-1:0] counter;
+  reg  [ACC_WIDTH-1:0] accumulator;
+  wire [ACC_WIDTH:0]   sum;
 
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            counter   <= 0;
-            baud_tick <= 1'b0;
-        end else begin
-            if (counter == CLKS_PER_BIT - 1) begin
-                counter   <= 0;
-                baud_tick <= 1'b1;
-            end else begin
-                counter   <= counter + 1'b1;
-                baud_tick <= 1'b0;
-            end
-        end
+  assign sum = {1'b0, accumulator} + TICK_RATE;
+
+  assign tick =
+         enable &&
+         !restart &&
+         (sum >= CLK_FREQ);
+
+  always @(posedge clk or negedge rst_n)
+  begin
+
+    if (!rst_n)
+    begin
+      accumulator <= {ACC_WIDTH{1'b0}};
+
     end
+    else if (restart || !enable)
+    begin
+      accumulator <= {ACC_WIDTH{1'b0}};
+
+    end
+    else if (tick)
+    begin
+      accumulator <= sum - CLK_FREQ;
+
+    end
+    else
+    begin
+      accumulator <= sum[ACC_WIDTH-1:0];
+    end
+
+  end
+
 endmodule
