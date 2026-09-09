@@ -7,3 +7,9 @@ Verilog implementations and testbenches for digital communication protocols.
 - [x] SPI
 - [x] UART
 - [x] I2C
+
+## Protocol Overview
+
+<p align="center">
+  <img src="communication_protocols.gif" width="700">
+</p>
