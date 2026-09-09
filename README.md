@@ -10,5 +10,5 @@ Verilog implementations and testbenches for digital communication protocols.
 
 ## Protocol Overview
 <p align="center">
-  <img src="1788916321768.gif" width="700">
+  <img src="1788916321768.gif" width="500">
 </p>
