@@ -9,7 +9,6 @@ Verilog implementations and testbenches for digital communication protocols.
 - [x] I2C
 
 ## Protocol Overview
-
 <p align="center">
-  <img src="communication_protocols.gif" width="700">
+  <img src="1788916321768.gif" width="700">
 </p>
