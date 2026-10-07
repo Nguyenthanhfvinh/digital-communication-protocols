@@ -22,11 +22,21 @@ module i2c_master #(
         (SYS_CLK_FREQ / (I2C_FREQ * 4) < 1) ?
         1 : SYS_CLK_FREQ / (I2C_FREQ * 4);
 
-    reg [$clog2(TICK_DIV)-1:0] clk_cnt;
+    localparam integer CLK_CNT_WIDTH = (TICK_DIV <= 1) ? 1 : $clog2(TICK_DIV);
+    reg [CLK_CNT_WIDTH-1:0] clk_cnt;
     reg tick;
+
+    // A released SCL can still be held low by the slave. Restart the
+    // quarter-period timer while waiting so the subsequent high phase
+    // gets its full duration, even if the slave releases SCL between ticks.
+    wire stretch_wait;
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
+            clk_cnt <= 0;
+            tick    <= 0;
+        end
+        else if (stretch_wait) begin
             clk_cnt <= 0;
             tick    <= 0;
         end
@@ -59,6 +69,7 @@ module i2c_master #(
 
     reg [7:0] tx_shift;
     reg [7:0] rx_shift;
+    reg [7:0] write_data;
 
     reg is_read;
 
@@ -68,6 +79,7 @@ module i2c_master #(
 
     assign scl = (scl_out == 1'b0) ? 1'b0 : 1'bz;
     assign sda = (sda_out == 1'b0) ? 1'b0 : 1'bz;
+    assign stretch_wait = scl_out && !scl;
 
     // Main FSM
     always @(posedge clk or posedge rst) begin
@@ -82,6 +94,7 @@ module i2c_master #(
 
             tx_shift   <= 0;
             rx_shift   <= 0;
+            write_data <= 0;
 
             data_out   <= 0;
             busy       <= 0;
@@ -98,6 +111,8 @@ module i2c_master #(
 
                 tx_shift  <= {addr, rw};
                 is_read   <= rw;
+                write_data <= data_in;
+                rx_shift  <= 0;
 
                 bit_cnt   <= 3'd7;
                 phase     <= 2'd0;
@@ -105,7 +120,7 @@ module i2c_master #(
                 state     <= START1;
             end
 
-            else if (tick) begin
+            else if (tick && !stretch_wait) begin
 
                 case (state)
 
@@ -118,12 +133,19 @@ module i2c_master #(
                 START1: begin
                     scl_out <= 1;
                     sda_out <= 0;
+                    phase   <= 0;
                     state   <= START2;
                 end
 
                 START2: begin
-                    scl_out <= 0;
-                    state   <= ADDR;
+                    // Hold START for two quarter periods before lowering SCL.
+                    if (phase == 0)
+                        phase <= 1;
+                    else begin
+                        scl_out <= 0;
+                        phase   <= 0;
+                        state   <= ADDR;
+                    end
                 end
 
                 ADDR: begin
@@ -186,10 +208,11 @@ module i2c_master #(
                         bit_cnt <= 7;
 
                         if (!is_read)
-                            tx_shift <= data_in;
+                            tx_shift <= write_data;
 
                         phase <= 0;
-                        state <= DATA;
+                        // An unacknowledged address ends the transaction.
+                        state <= ack_error ? STOP1 : DATA;
                     end
 
                     endcase
@@ -228,7 +251,7 @@ module i2c_master #(
                         if (bit_cnt == 0) begin
 
                             if (is_read)
-                                data_out <= {rx_shift[6:0], sda};
+                                data_out <= rx_shift;
 
                             phase <= 0;
                             state <= ACK_DATA;
@@ -264,7 +287,7 @@ module i2c_master #(
 
                     2: begin
                         if (!is_read)
-                            ack_error <= sda; // Sample slave ACK on write
+                            ack_error <= ack_error | sda;
 
                         phase <= 3;
                     end
@@ -280,14 +303,30 @@ module i2c_master #(
                 STOP1: begin
                     scl_out <= 0;
                     sda_out <= 0;
+                    phase   <= 0;
                     state   <= STOP2;
                 end
 
                 STOP2: begin
-                    scl_out <= 1;
-                    sda_out <= 1;
-                    busy    <= 0;
-                    state   <= IDLE;
+                    case (phase)
+                    0: begin
+                        // Raise SCL first, keeping SDA low. stretch_wait
+                        // prevents advancing until SCL actually rises.
+                        scl_out <= 1;
+                        phase   <= 1;
+                    end
+                    1: phase <= 2;
+                    2: begin
+                        // SDA rising while SCL is high creates STOP.
+                        sda_out <= 1;
+                        phase   <= 3;
+                    end
+                    3: begin
+                        busy    <= 0;
+                        phase   <= 0;
+                        state   <= IDLE;
+                    end
+                    endcase
                 end
 
                 default: begin

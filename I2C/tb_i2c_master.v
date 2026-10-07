@@ -3,8 +3,10 @@
 module tb_i2c_master;
 
     // Parameters
-    localparam SYS_CLK_FREQ = 50_000_000;
-    localparam I2C_FREQ     = 100_000;
+    parameter SYS_CLK_FREQ = 50_000_000;
+    parameter I2C_FREQ     = 100_000;
+    parameter DEBUG        = 0;
+    parameter EXHAUSTIVE   = 1;
 
     // DUT signals
     reg         clk;
@@ -29,13 +31,53 @@ module tb_i2c_master;
     reg sda_drive_en;
     reg sda_drive_val;
 
-    assign sda = sda_drive_en ? sda_drive_val : 1'bz;
+    assign sda = (sda_drive_en && !sda_drive_val) ? 1'b0 : 1'bz;
+    reg stretch_scl;
+    assign scl = stretch_scl ? 1'b0 : 1'bz;
 
     reg        slave_ack_addr;
     reg        slave_ack_data;
     reg [7:0]  slave_data;
 
     integer scl_edges;
+    reg [7:0] captured_addr;
+    reg [7:0] captured_data;
+    integer data_bits;
+    integer bus_clocks;
+    integer start_count;
+    reg stop_seen;
+
+    // Observe the bus independently of the master's data registers.
+    always @(posedge busy) begin
+        captured_addr = 0;
+        captured_data = 0;
+        data_bits = 0;
+        bus_clocks = 0;
+        start_count = 0;
+        stop_seen = 0;
+    end
+
+    always @(posedge scl) begin
+        if (busy && !rst) begin
+            bus_clocks = bus_clocks + 1;
+            if (scl_edges >= 1 && scl_edges <= 8)
+                captured_addr = {captured_addr[6:0], sda};
+            else if (scl_edges >= 10 && scl_edges <= 17 && slave_ack_addr) begin
+                captured_data = {captured_data[6:0], sda};
+                data_bits = data_bits + 1;
+            end
+            else if (scl_edges == 18 && rw && slave_ack_addr && sda !== 1'b1)
+                $fatal(1, "Master did not send NACK after its single-byte read");
+        end
+    end
+
+    always @(posedge sda)
+        if (busy && !rst && scl === 1'b1)
+            stop_seen = 1;
+
+    always @(negedge sda)
+        if (busy && !rst && scl === 1'b1)
+            start_count = start_count + 1;
 
     // DUT Instantiation
     i2c_master #(
@@ -73,9 +115,9 @@ module tb_i2c_master;
     end
 
     always @(posedge clk) begin
-        if (dut.state   != prev_state ||
+        if (DEBUG && (dut.state   != prev_state ||
             dut.phase   != prev_phase ||
-            dut.bit_cnt != prev_bit) begin
+            dut.bit_cnt != prev_bit)) begin
 
             $display("[%0t] state=%0d phase=%0d bit=%0d busy=%b scl=%b sda=%b ack=%b",
                      $time,
@@ -115,7 +157,7 @@ module tb_i2c_master;
             end
 
             // Data phase
-            else if (scl_edges >= 9 && scl_edges <= 16) begin
+            else if (scl_edges >= 9 && scl_edges <= 16 && slave_ack_addr) begin
 
                 if (rw) begin
                     sda_drive_en  = 1;
@@ -127,7 +169,7 @@ module tb_i2c_master;
             end
 
             // Data ACK
-            else if (scl_edges == 17) begin
+            else if (scl_edges == 17 && slave_ack_addr) begin
 
                 if (!rw) begin
                     sda_drive_en  = 1;
@@ -154,7 +196,7 @@ module tb_i2c_master;
         rst   = 1;
         start = 0;
 
-        repeat (5) @(posedge clk);
+        repeat (5) @(negedge clk);
 
         rst = 0;
 
@@ -176,16 +218,8 @@ module tb_i2c_master;
             begin
                 #2ms;
 
-                $error("TIMEOUT!");
-
-                $display("state     = %0d", dut.state);
-                $display("phase     = %0d", dut.phase);
-                $display("bit_cnt   = %0d", dut.bit_cnt);
-                $display("busy      = %b", busy);
-                $display("scl       = %b", scl);
-                $display("sda       = %b", sda);
-
-                $finish;
+                $fatal(1, "TIMEOUT: state=%0d phase=%0d busy=%b scl=%b sda=%b",
+                       dut.state, dut.phase, busy, scl, sda);
             end
         join_any
 
@@ -228,8 +262,20 @@ module tb_i2c_master;
 
         wait_done();
 
+        if (start_count != 1 || !stop_seen || scl !== 1'b1 || sda !== 1'b1)
+            $fatal(1, "[TC%0d] Missing STOP or bus not released", tc);
+        if (captured_addr !== {t_addr, 1'b0})
+            $fatal(1, "[TC%0d] Incorrect write address on bus: %02h", tc, captured_addr);
+        if (a_ack && (data_bits != 8 || captured_data !== t_data))
+            $fatal(1, "[TC%0d] Incorrect write data on bus: %02h (%0d bits)",
+                   tc, captured_data, data_bits);
+        if (!a_ack && data_bits != 0)
+            $fatal(1, "[TC%0d] Data transmitted after address NACK", tc);
+        if (bus_clocks != (a_ack ? 19 : 10))
+            $fatal(1, "[TC%0d] Incorrect transaction length: %0d clocks", tc, bus_clocks);
+
         if (ack_error !== ~(a_ack & d_ack)) begin
-            $error("[TC%0d] FAIL: ack_error=%b expected=%b",
+            $fatal(1, "[TC%0d] FAIL: ack_error=%b expected=%b",
                     tc, ack_error, ~(a_ack & d_ack));
         end
         else begin
@@ -261,13 +307,22 @@ module tb_i2c_master;
 
         wait_done();
 
+        if (start_count != 1 || !stop_seen || scl !== 1'b1 || sda !== 1'b1)
+            $fatal(1, "[TC%0d] Missing STOP or bus not released", tc);
+        if (captured_addr !== {t_addr, 1'b1})
+            $fatal(1, "[TC%0d] Incorrect read address on bus: %02h", tc, captured_addr);
+        if (data_bits != (a_ack ? 8 : 0))
+            $fatal(1, "[TC%0d] Incorrect read length: %0d bits", tc, data_bits);
+        if (bus_clocks != (a_ack ? 19 : 10))
+            $fatal(1, "[TC%0d] Incorrect transaction length: %0d clocks", tc, bus_clocks);
+
         if (a_ack) begin
 
             if (ack_error) begin
-                $error("[TC%0d] FAIL: Unexpected ACK error", tc);
+                $fatal(1, "[TC%0d] FAIL: Unexpected ACK error", tc);
             end
             else if (data_out !== t_slave_data) begin
-                $error("[TC%0d] FAIL: recv=%02h expected=%02h",
+                $fatal(1, "[TC%0d] FAIL: recv=%02h expected=%02h",
                         tc, data_out, t_slave_data);
             end
             else begin
@@ -277,7 +332,7 @@ module tb_i2c_master;
         else begin
 
             if (!ack_error) begin
-                $error("[TC%0d] FAIL: Expected ACK error", tc);
+                $fatal(1, "[TC%0d] FAIL: Expected ACK error", tc);
             end
             else begin
                 $display("[TC%0d] PASS (NACK detected)", tc);
@@ -285,6 +340,29 @@ module tb_i2c_master;
         end
 
         repeat (5) @(posedge clk);
+    end
+    endtask
+
+    task hold_scl_low;
+        input integer edge_index;
+        integer clocks_before;
+        reg sda_before;
+    begin
+        // Start while SCL is already low: stretching must not introduce
+        // an artificial falling edge into the slave's bit counter.
+        wait (scl_edges == edge_index);
+        @(negedge scl);
+        stretch_scl = 1'b1;
+        wait (dut.scl_out == 1'b1);
+        @(negedge clk);
+        clocks_before = bus_clocks;
+        sda_before = sda;
+        #20us;
+        if (!busy || scl !== 1'b0 || bus_clocks != clocks_before || sda !== sda_before)
+            $fatal(1, "Master advanced its transaction while slave stretched SCL");
+        // Release away from the system clock edge to exercise divider restart.
+        #7;
+        stretch_scl = 1'b0;
     end
     endtask
 
@@ -303,6 +381,14 @@ module tb_i2c_master;
         slave_data      = 8'h3C;
         sda_drive_en    = 0;
         sda_drive_val   = 1'b1;
+        stretch_scl     = 0;
+        scl_edges       = 0;
+        captured_addr   = 0;
+        captured_data   = 0;
+        data_bits       = 0;
+        bus_clocks      = 0;
+        start_count     = 0;
+        stop_seen       = 0;
 
         reset_dut();
 
@@ -355,16 +441,17 @@ module tb_i2c_master;
 
         wait (busy);
 
-        repeat (20) @(posedge clk);
+        wait (scl_edges >= 4);
 
+        @(negedge clk);
         rst = 1;
-        repeat (3) @(posedge clk);
+        repeat (3) @(negedge clk);
         rst = 0;
 
         repeat (5) @(posedge clk);
 
-        if (busy !== 1'b0)
-            $error("[TC10] FAIL: busy not cleared by reset");
+        if (busy !== 1'b0 || scl !== 1'b1 || sda !== 1'b1)
+            $fatal(1, "[TC10] FAIL: reset did not release the bus");
         else
             $display("[TC10] PASS");
 
@@ -377,28 +464,61 @@ module tb_i2c_master;
             end
 
             begin
-                wait (scl_edges == 8);
-
-                @(negedge scl);
-
-                force scl = 1'b0;
-
-                $display("[%0t] Slave stretches SCL", $time);
-
-                #20us;
-
-                release scl;
-
-                $display("[%0t] Slave releases SCL", $time);
+                hold_scl_low(8);
             end
         join
 
 
-        $display(" ALL TESTS COMPLETED");
+        // Stretch an address bit, a read data bit, a write ACK and STOP.
+        fork
+            do_write(7'h27, 8'h96, 1, 1, 12);
+            hold_scl_low(3);
+        join
+        fork
+            do_read(7'h50, 8'hA5, 1, 13);
+            hold_scl_low(12);
+        join
+        fork
+            do_write(7'h50, 8'h69, 1, 1, 14);
+            hold_scl_low(17);
+        join
+        fork
+            do_write(7'h50, 8'h81, 1, 1, 15);
+            hold_scl_low(18);
+        join
+
+        // Capture the write byte with start, before a later host update.
+        fork
+            do_write(7'h50, 8'hA5, 1, 1, 16);
+            begin
+                @(posedge busy);
+                @(negedge clk);
+                data_in = 8'h5A;
+            end
+        join
+
+        // Check the opposite ACK combination and recovery after NACK.
+        do_write(7'h50, 8'hA5, 0, 0, 17);
+        do_write(7'h50, 8'h5A, 1, 1, 18);
+
+        if (EXHAUSTIVE) begin
+            for (i = 0; i < 256; i = i + 1) begin
+                do_read(7'h50, i[7:0], 1, 19);
+                do_write(7'h27, i[7:0], 1, 1, 20);
+            end
+            $display("PASS exhaustive: all 256 read and write byte values");
+        end
+
+        $display("ALL TESTS PASSED");
 
 
         #1000;
         $finish;
+    end
+
+    initial begin
+        #200ms;
+        $fatal(1, "Global testbench timeout");
     end
 
 endmodule

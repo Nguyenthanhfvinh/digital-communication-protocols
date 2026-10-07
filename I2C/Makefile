@@ -270,8 +270,8 @@ check: run
 		echo "[ERROR] Không tìm thấy simulation log"; \
 		exit 1; \
 	fi
-	@errors=$$(grep -cE "# \*\* Error|# Error|Error:|FATAL|UVM_ERROR|UVM_FATAL" "$(LOG_FILE)" || true); \
-	fails=$$(grep -cE "TEST FAILED|FAILED|Assertion.*failed" "$(LOG_FILE)" || true); \
+	@errors=$$(grep -cE "# \*\* (Error|Fatal)|# Error|Error:|FATAL|UVM_ERROR|UVM_FATAL" "$(LOG_FILE)" || true); \
+	fails=$$(grep -cE "TEST FAILED|FAILED|FAIL:|Assertion.*failed" "$(LOG_FILE)" || true); \
 	passes=$$(grep -cE "TEST PASSED|PASSED|Simulation PASSED|# \*\* Note:.*PASS" "$(LOG_FILE)" || true); \
 	if [ $$errors -gt 0 ] || [ $$fails -gt 0 ]; then \
 		echo "[RESULT] FAIL"; \
